@@ -3,7 +3,7 @@
 **Student:** Alessio Fukuda
 **Repository:** <https://github.com/afukuda69/live-market-workstation> _(confirm URL)_
 **Submitted commit:** `REPLACE_WITH_COMMIT_SHA` (`git rev-parse HEAD`)
-**Video (30–60 s):** REPLACE_WITH_VIDEO_LINK _(check it opens in a private/incognito window)_
+**Video (30–60 s):** <https://drive.google.com/file/d/1niD55L3WWFwusmE2XaevG6ldWMGernB5/view?usp=drive_link>
 
 ## Summary of what was completed
 
@@ -32,9 +32,14 @@ Supporting documents: [README](README.md) (setup, DB initialisation, startup) ·
 
 - Backend: `python -m pytest -q` → **40 passed** (aggregation rules, de-duplication, revisions, out-of-order/late, rejected messages, replay equivalence, Yahoo client against fake servers incl. outage and recovery, REST/WebSocket API).
 - Browser: Playwright against the SIMULATED feed → **4 passed** (chart renders and updates; source/state/age visible; symbol switch; replay + verify; duplicate counter).
-- CI: GitHub Actions runs both on each push. _Link a green run: REPLACE_WITH_ACTIONS_RUN_URL_
 - Real unavailable feed: in a network that blocks Yahoo the app reported `UNAVAILABLE` with the proxy error and increasing retries (verification §2).
-- Live Yahoo observations: _fill in from verification §3 — date/time, tick rate, lag, whether real data produced duplicates or out-of-order ticks, replay verify result._
+- **Live Yahoo run, 2026-11-12, ~8:13–9:45 PM ET (macOS)** — details in [verification §3](docs/verification.md):
+  - Recorded **1,279 live ticks** (BTC-USD 891, SPY 229, AAPL 159) and **1,753 history bars**. BTC-USD source→backend delay averaged **~3.0 s** (min 0.8 s).
+  - After US market close, AAPL/SPY ticks carried source timestamps up to ~4.5 hours old; the data-age display showed them as old rather than current, which is the behaviour the age indicator is for.
+  - **Real duplicates:** Yahoo re-sent **22 identical ticks**, each stored once and counted. A further **3,480** duplicate history bars came from re-downloading the same day on each backend restart — also recognised and not stored twice.
+  - **Real revisions:** 3 `late` revisions (ticks arriving after their candle was marked complete) and 4 `backfill_revision`s (Yahoo changed a history bar). No out-of-order ticks were observed in real data; that rule is covered by automated tests.
+  - **Replay check on the real recorded data:** rebuilding all candles from stored observations matched the stored candles exactly — BTC-USD 162/162, AAPL 839/839, SPY 963/963, **0 mismatches**.
+  - **Unavailable feed, observed for real three ways:** (1) on first start the feed was `UNAVAILABLE` with `SSLCertVerificationError` until Python's certificates were installed; (2) with Wi-Fi off (9:03–9:11 PM) it reported `gaierror` DNS failures with backoff retries and recovered to LIVE automatically; (3) Yahoo closed the connection 7 times with `keepalive ping timeout`, each shown as UNAVAILABLE and reconnected within ~2–5 s. The demo video also uses the labelled INJECTED outage toggle.
 
 Mocked versus live evidence is separated in [docs/verification.md](docs/verification.md).
 
@@ -45,3 +50,5 @@ Mocked versus live evidence is separated in [docs/verification.md](docs/verifica
 - History bars never replace tick-built candles.
 - Completion depends on the backend's clock.
 - Browser tests use the simulated feed; real-feed behaviour is shown by manual observation and the video.
+- Yahoo's stream drops the connection every few minutes during quiet periods (`keepalive ping timeout`); the app recovers automatically but briefly shows UNAVAILABLE/STALE. A future fix is to tune the WebSocket ping settings.
+- The status detail line keeps saying "waiting for price updates" after ticks arrive, and the "Duplicates ignored" counter combines duplicate ticks with re-downloaded history bars. Both are display issues to fix in Part 4.2.

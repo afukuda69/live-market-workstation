@@ -48,22 +48,35 @@ yahoo-history history_unavailable SPY: Yahoo returned no 1m bars
 that yfinance's history call returned an *empty* result for SPY rather than an
 error — the app logs that as `history_unavailable` too.
 
-## 3. Live Yahoo observations — TO RECORD on your machine
+## 3. Live Yahoo observations — 2026-11-12, macOS, ~8:13–9:45 PM ET
 
-Fill these in when you run against the real feed; keep them honest (date, time, what you saw).
+Recorded from `backend/data/market.db` and the dashboard after the session.
+These are observations of the real provider, not automated tests.
 
-- [ ] `python -m scripts.live_check BTC-USD --seconds 30` output pasted here (ticks, lag in ms, whether `day_volume` is present).
-- [ ] Same for an equity during market hours (e.g. `AAPL SPY`), and outside hours (expect 0 ticks).
-- [ ] Screenshot: dashboard LIVE with data age < 5 s.
-- [ ] Screenshot: Wi-Fi off → UNAVAILABLE banner; Wi-Fi on → LIVE again.
-- [ ] Screenshot: AAPL after close → STALE.
-- [ ] `sqlite3 backend/data/market.db "select source, count(*), sum(duplicate_count) from observations group by source;"`
-- [ ] `sqlite3 backend/data/market.db "select reason, count(*) from candle_revisions group by reason;"` (did real data produce `out_of_order` or `late`?)
-- [ ] `/api/replay/verify?symbol=BTC-USD` result on real recorded data.
-- [ ] Observed message rate and any gaps for BTC-USD.
+| Observation | Result |
+|---|---|
+| Live ticks recorded | 1,279 (BTC-USD 891, SPY 229, AAPL 159) from `yahoo-ws` |
+| History bars recorded | 1,753 (`yahoo-history`, today's 1-minute bars) |
+| BTC-USD source → backend delay | mean ~3.0 s, min 0.8 s; larger only right after reconnects |
+| AAPL / SPY after market close | ticks carried source times up to ~4.5 h old; dashboard data age showed them as old |
+| Duplicate ticks from Yahoo | 22 (stored once each, `duplicate_count` incremented) |
+| Duplicate history bars | 3,480 (same bars re-downloaded on each backend restart) |
+| Candle revisions by reason | new 216, update 996, finalize 216, late 3, backfill 1,748, backfill_revision 4 |
+| Out-of-order ticks in real data | 0 observed (rule covered by automated tests only) |
+| Replay = stored, real data | BTC-USD 162/162, AAPL 839/839, SPY 963/963 candles, 0 mismatches |
+
+**Unavailable-feed conditions observed for real (from `feed_events`):**
+
+- 8:13–8:15 PM — `SSLCertVerificationError: certificate verify failed` on every connect (python.org Python 3.14 without its certificate bundle). Shown as UNAVAILABLE with backoff 2, 4, 8, 16, 30 s. Fixed by running *Install Certificates.command*; next start went LIVE.
+- 9:03–9:11 PM — Wi-Fi off: `gaierror: [Errno 8] nodename nor servname provided` with retries #2–#7; LIVE again at 9:11:19 PM after Wi-Fi returned, with no restart.
+- 8:35–9:43 PM — 7 disconnects `ConnectionClosedError: keepalive ping timeout`, each shown as UNAVAILABLE and reconnected in ~2–5 s; quiet gaps also triggered STALE (no messages for 30+ s) followed by "messages resumed".
+- Backend stopped while the page was open → browser showed BACKEND OFFLINE ("data shown is frozen").
+- 9:43 PM — labelled INJECTED outage via the *Simulate feed outage* button (used in the demo video).
+
+Demo video: <https://drive.google.com/file/d/1niD55L3WWFwusmE2XaevG6ldWMGernB5/view?usp=drive_link>
 
 ## 4. Not verified / limitations of the evidence
 
 * Automated tests use fake WebSocket servers; they cannot show Yahoo's real message rate, field availability or outages.
-* Duplicates and out-of-order delivery are *forced* by the mock feed; whether the real Yahoo feed produces them is an open observation (§3).
+* Real Yahoo data produced duplicates and late ticks but no out-of-order ticks in this session; out-of-order handling is verified only by forced cases in the mock feed and unit tests.
 * Browser tests run headless Chrome on Linux; Safari was not tested.

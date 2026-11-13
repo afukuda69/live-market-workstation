@@ -46,6 +46,24 @@ redacted; this is not a full chat export.
 - **Observation:** my first `test_out_of_order_and_late_are_recorded` expected close 101.0 after a late tick, but the late tick (source time :59) is the *newest* tick in that minute, so the rule "close = latest source time" makes it 97.0.
 - **Decision:** kept the rule (it matches how a candle is defined) and fixed the expectation.
 
+## E5 — Failure on macOS: SSL certificate verification
+
+- **Observation:** first live start on the Mac logged `feed yahoo-ws: unavailable SSLCertVerificationError: certificate verify failed: unable to get local issuer certificate`, retrying with backoff; the dashboard showed UNAVAILABLE.
+- **Diagnosis:** python.org's Python 3.14 for macOS ships without a CA certificate bundle, so every TLS connection failed. Not an app bug — and a useful real check that the outage path works.
+- **Decision:** ran `/Applications/Python 3.14/Install Certificates.command` and restarted; the feed went LIVE. Fallback documented: `export SSL_CERT_FILE=$(python -c "import certifi; print(certifi.where())")`.
+- **Uncertainty:** other machines with the same Python build will hit this; README could mention it.
+
+## E6 — Revised approach: GitHub push rejected for the CI workflow
+
+- **Observation:** `git push` failed: `refusing to allow a Personal Access Token to create or update workflow .github/workflows/ci.yml without workflow scope`; a later attempt returned 403.
+- **Evidence:** `curl -sI -H "Authorization: token …" https://api.github.com/user | grep -i x-oauth-scopes` first printed an empty scope list, showing the token in use had no usable scopes.
+- **Decision:** created a classic token with `repo` + `workflow`, verified it printed `x-oauth-scopes: repo, workflow`, cleared the cached credential (`git credential-osxkeychain erase`) and pushed successfully (commit `8fe748b`). The token was then regenerated because it had been pasted into a chat.
+
+## E7 — Live observation: Yahoo keepalive disconnects
+
+- **Observation:** `feed_events` shows 7 `ConnectionClosedError: keepalive ping timeout` disconnects between 8:35 and 9:43 PM, each followed by reconnect in ~2–5 s, often after a quiet period flagged STALE.
+- **Decision:** behaviour is handled correctly (visible, logged, recovered), so kept for 4.1 and listed as a limitation; investigate WebSocket `ping_interval`/`ping_timeout` settings in 4.2.
+
 ---
 
 ### Template for new entries
