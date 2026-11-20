@@ -2,9 +2,9 @@
 
 **Student:** Alessio Fukuda
 **Repository:** <https://github.com/afukuda69/live-market-workstation>
-**Submitted commit:** `REPLACE_WITH_COMMIT_SHA` (`git rev-parse HEAD`)
+**Submitted commit:** `b7053508e997031dd8f7ce23ee94c65b7402dbfb` (`git rev-parse HEAD`)
 **Video (30–60 s):** <https://drive.google.com/file/d/128cJwyx7vLFpiVFsPK5RAOUPNbxrV3Zl/view?usp=sharing>
-**CI run (GitHub Actions):** REPLACE_WITH_ACTIONS_RUN_URL
+**CI run (GitHub Actions):** <https://github.com/afukuda69/live-market-workstation/commit/b7053508e997031dd8f7ce23ee94c65b7402dbfb/checks>
 
 ## Summary of what was completed
 
