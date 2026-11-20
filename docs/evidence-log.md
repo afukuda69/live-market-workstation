@@ -64,6 +64,37 @@ redacted; this is not a full chat export.
 - **Observation:** `feed_events` shows 7 `ConnectionClosedError: keepalive ping timeout` disconnects between 8:35 and 9:43 PM, each followed by reconnect in ~2–5 s, often after a quiet period flagged STALE.
 - **Decision:** behaviour is handled correctly (visible, logged, recovered), so kept for 4.1 and listed as a limitation; investigate WebSocket `ping_interval`/`ping_timeout` settings in 4.2.
 
+## E8 — Failure found by a browser test: replay verification bypassed the live SMA state (Part 4.2)
+
+- **Intent:** e2e check that the live incremental SMAs equal a batch recomputation.
+- **Observation:** the Playwright test failed 3 of 5 runs: `✗ differ — incremental 89984.1350 / (none) vs batch 89984.1350 / 90005.2175 over 4 candles`. The incremental state had seen one candle fewer. Polling the same endpoint with curl never reproduced it.
+- **Diagnosis:** only the browser suite ran the 4.1 *Verify replay = stored* test in parallel. `/api/replay/verify` called `engine.finalize_due(now)` directly, which marks due candles complete in SQLite **without** passing the change to listeners — so the new live runner never saw that candle complete.
+- **Fix (generated code):**
+  ```python
+  # main.py — /api/replay/verify
+  for ch in app.state.service.engine.finalize_due(clock):
+      await app.state.service._broadcast_change(ch)
+  ```
+  plus a regression test `test_replay_verify_finalisation_reaches_live_indicators`, confirmed to **fail on the old code and pass on the new**, and a new rule in CLAUDE.md (invariant 12).
+- **Check:** pytest 92 passed; Playwright 8/8 on 5 consecutive runs.
+- **Uncertainty:** any future code that finalises candles must follow the same rule; the invariant documents it.
+
+## E9 — Revised approach: provisional SMA could skip a candle
+
+- **Observation (design review):** in the ~5 s between a candle ending and being marked complete, the next candle is already forming. Computing its provisional SMA from the *confirmed* window would leave out the candle in its grace period.
+- **Decision:** show a provisional value only when every earlier candle is complete (batch: `candles[-2].is_complete`; live: the forming candle is adjacent to the last confirmed one). Test: `test_no_provisional_point_while_previous_candle_is_unfinished`. The legend falls back to the newest available values during that moment.
+
+## E10 — Edge case: a delayed tick creates a candle *behind* the newest one
+
+- **Observation:** the mock feed delays some ticks; occasionally the only ticks for a minute arrive after the next minute already completed, so an older candle appears later.
+- **Decision:** treat any change to a candle at or before the last one used as "rebuild the SMA state from SQLite" (debounced 0.5 s, or immediately when needed); do not re-trade the past. Tests: `test_late_revision_triggers_rebuild`, `test_candle_filled_in_behind_the_latest_is_handled`.
+
+## E11 — Live observation: many late ticks after market close
+
+- **Observation:** the 2026-11-19 session recorded 161 `late` candle revisions. Most came from after-hours AAPL/SPY quotes whose source timestamps were 40–50 s old, so they landed in candles already marked complete (5 s grace).
+- **Decision:** behaviour is as designed: the candle is revised visibly, the SMA state is rebuilt, and no trade is redone. A longer grace period would reduce late revisions but delay every decision; kept 5 s and documented it.
+- **Uncertainty:** during regular hours the delay is ~3 s, so late ticks should be rare; not yet measured during market hours with 4.2 running.
+
 ---
 
 ### Template for new entries

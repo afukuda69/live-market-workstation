@@ -22,7 +22,12 @@ from .feeds.history import backfill
 from .feeds.mock import MockFeed
 from .feeds.replay import rebuild, stream_replay
 from .feeds.yahoo_live import YahooLiveFeed
+from .backtest import run_backtest
+from .accounting import AccountConfig
+from .history_data import (YAHOO_INTERVALS, describe, list_fixtures, load_cached_yahoo, load_fixture,
+                           load_stored, refresh_yahoo)
 from .hub import Hub
+from .sim_live import LiveSimRunner
 from .service import MarketService, now_ms
 from .store import Store
 
@@ -34,6 +39,24 @@ FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
 class FaultRequest(BaseModel):
     enabled: bool
+
+
+class ResetRequest(BaseModel):
+    symbol: str
+
+
+class BacktestRequest(BaseModel):
+    symbol: str = "SPY"
+    source: str = "fixture"          # 'fixture' | 'stored' | 'yahoo'
+    interval: str = "1m"             # for 'yahoo': 1m, 5m, 15m, 1h, 1d
+    fixture: Optional[str] = None    # for 'fixture'
+    refresh: bool = True             # for 'yahoo': download before running (else cache only)
+    fast: int = 10
+    slow: int = 30
+    initial_cash: float = 100_000.0
+    fee_bps: float = 10.0
+    slippage_bps: float = 5.0
+    allocation: float = 1.0
 
 
 def create_app(settings: Optional[Settings] = None, start_feed: bool = True) -> FastAPI:
@@ -49,6 +72,17 @@ def create_app(settings: Optional[Settings] = None, start_feed: bool = True) -> 
         app.state.settings, app.state.store, app.state.hub, app.state.service = settings, store, hub, service
         app.state.feed = None
         tasks: list[asyncio.Task] = [asyncio.create_task(service.housekeeping_loop(), name="housekeeping")]
+
+        def latest_price(sym):
+            st = service.status.symbols.get(sym) or {}
+            return st.get("last_price"), st.get("last_source_ms")
+
+        sim = LiveSimRunner(settings, store, hub, latest_price)
+        sim.start()
+        app.state.sim = sim
+        if settings.sim_enabled:
+            service.listeners.append(sim.on_change)
+        tasks.append(asyncio.create_task(sim.account_loop(), name="sim-accounts"))
         store.record_event(now_ms(), "app", "startup",
                            f"mode={settings.feed_mode} symbols={','.join(settings.symbols)} db={settings.db_path.name}")
         if start_feed:
@@ -128,14 +162,18 @@ def create_app(settings: Optional[Settings] = None, start_feed: bool = True) -> 
         return {"db": app.state.store.stats(), "session": app.state.service.all_counters()}
 
     @app.get("/api/replay/verify")
-    def verify_replay(symbol: str):
+    async def verify_replay(symbol: str):
         """Rebuild candles from recorded observations and compare with stored candles."""
         s = app.state.settings
         store = app.state.store
         # Bring stored candles up to date first (the housekeeping loop does the
         # same every second) so both sides are compared at the same clock.
         clock = now_ms()
-        app.state.service.engine.finalize_due(clock)
+        # Finalise through the service so listeners (live SMAs, paper trading)
+        # see these candles complete too. (Calling engine.finalize_due directly
+        # here skipped them — found by the Part 4.2 browser test; see evidence log.)
+        for ch in app.state.service.engine.finalize_due(clock):
+            await app.state.service._broadcast_change(ch)
         book = rebuild(store, s, symbol.upper(), end_clock_ms=clock)
         stored = {c.bucket_start_ms: c for c in store.candles(symbol.upper(), s.interval_label, limit=100000)}
         rebuilt = {c.bucket_start_ms: c for c in book.all(symbol.upper())}
@@ -157,6 +195,110 @@ def create_app(settings: Optional[Settings] = None, start_feed: bool = True) -> 
             raise HTTPException(409, "fault injection applies to the live Yahoo feed only")
         await feed.set_fault(req.enabled)
         return {"fault_injected": req.enabled}
+
+    # ---- Part 4.2: indicators, simulated account, backtests ------------------
+    def _symbol(symbol: str) -> str:
+        sym = symbol.upper()
+        if sym not in app.state.settings.symbols:
+            raise HTTPException(404, f"unknown symbol {sym}")
+        return sym
+
+    @app.get("/api/indicators")
+    def get_indicators(symbol: str, limit: int = Query(300, ge=1, le=5000)):
+        s = app.state.settings
+        return {"symbol": _symbol(symbol), "fast": s.sma_fast, "slow": s.sma_slow,
+                "points": app.state.sim.indicator_points(_symbol(symbol), limit)}
+
+    @app.get("/api/indicators/verify")
+    def verify_indicators(symbol: str):
+        return app.state.sim.verify(_symbol(symbol))
+
+    @app.get("/api/sim/account")
+    def get_account(symbol: str):
+        return app.state.sim.account_view(_symbol(symbol))
+
+    @app.post("/api/sim/reset")
+    async def reset_account(req: ResetRequest):
+        return await app.state.sim.reset(_symbol(req.symbol))
+
+    @app.get("/api/backtest/options")
+    def backtest_options():
+        return {"symbols": app.state.settings.symbols, "fixtures": list_fixtures(),
+                "yahoo_intervals": {k: v[0] for k, v in YAHOO_INTERVALS.items()},
+                "defaults": BacktestRequest().model_dump()}
+
+    @app.post("/api/backtest")
+    async def post_backtest(req: BacktestRequest):
+        store = app.state.store
+        if not (1 <= req.fast < req.slow <= 500):
+            raise HTTPException(422, "need 1 <= fast < slow <= 500")
+        fetch = None
+        if req.source == "fixture":
+            name = req.fixture or (list_fixtures() or [None])[0]
+            if not name:
+                raise HTTPException(404, "no fixtures available")
+            try:
+                bars = load_fixture(name)
+            except FileNotFoundError as e:
+                raise HTTPException(404, str(e))
+            step, interval, symbol = 60_000, "1m", name.split("_")[0].upper()
+            data = {"fixture": name}
+        elif req.source == "stored":
+            symbol = _symbol(req.symbol)
+            bars, step, interval = load_stored(store, symbol, app.state.settings.interval_label), \
+                app.state.settings.interval_ms, app.state.settings.interval_label
+            data = {}
+        elif req.source == "yahoo":
+            symbol = req.symbol.upper()
+            if req.interval not in YAHOO_INTERVALS:
+                raise HTTPException(422, f"interval must be one of {list(YAHOO_INTERVALS)}")
+            interval, step = req.interval, YAHOO_INTERVALS[req.interval][1]
+            if req.refresh:
+                fetch = await refresh_yahoo(store, symbol, interval)
+            bars = load_cached_yahoo(store, symbol, interval)
+            data = {"fetch": fetch}
+        else:
+            raise HTTPException(422, "source must be fixture, stored or yahoo")
+        if len(bars) < req.slow + 2:
+            raise HTTPException(422, f"only {len(bars)} completed bars available; need at least {req.slow + 2}"
+                                + (f" (download failed: {fetch['error']})" if fetch and not fetch.get("ok") else ""))
+        cfg = AccountConfig(initial_cash=req.initial_cash, fee_bps=req.fee_bps,
+                            slippage_bps=req.slippage_bps, allocation=req.allocation)
+        result = run_backtest(bars, req.fast, req.slow, cfg)
+        data = {**data, **describe(bars, step), "source": req.source, "symbol": symbol, "interval": interval}
+        if data["gaps"]:
+            result.notes.append(f"{data['gaps']} gaps in the data (largest {data['largest_gap_ms'] // 60000} min); "
+                                "SMAs treat bars on either side of a gap as consecutive (gaps include market closures)")
+        if fetch and not fetch.get("ok"):
+            result.notes.append(f"download failed ({fetch['error']}); used {len(bars)} cached bars")
+        payload = result.to_dict()
+        with store.lock:
+            cur = store.conn.execute(
+                "INSERT INTO backtest_runs(created_ms, symbol, source, interval, params_json, data_json, "
+                "metrics_json, result_json) VALUES (?,?,?,?,?,?,?,?)",
+                (now_ms(), symbol, req.source, interval, json.dumps(req.model_dump()), json.dumps(data),
+                 json.dumps(result.metrics), json.dumps(payload)))
+        return {"id": cur.lastrowid, "data": data, **payload}
+
+    @app.get("/api/backtest/runs")
+    def list_runs(limit: int = Query(20, ge=1, le=200)):
+        with app.state.store.lock:
+            rows = app.state.store.conn.execute(
+                "SELECT id, created_ms, symbol, source, interval, params_json, data_json, metrics_json "
+                "FROM backtest_runs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return {"runs": [{"id": r["id"], "created_ms": r["created_ms"], "symbol": r["symbol"], "source": r["source"],
+                          "interval": r["interval"], "params": json.loads(r["params_json"]),
+                          "data": json.loads(r["data_json"]), "metrics": json.loads(r["metrics_json"])}
+                         for r in rows]}
+
+    @app.get("/api/backtest/runs/{run_id}")
+    def get_run(run_id: int):
+        with app.state.store.lock:
+            r = app.state.store.conn.execute("SELECT * FROM backtest_runs WHERE id=?", (run_id,)).fetchone()
+        if not r:
+            raise HTTPException(404, "no such run")
+        return {"id": r["id"], "created_ms": r["created_ms"], "data": json.loads(r["data_json"]),
+                **json.loads(r["result_json"])}
 
     # ---- WebSocket ---------------------------------------------------------
     @app.websocket("/ws")
@@ -184,8 +326,13 @@ def create_app(settings: Optional[Settings] = None, start_feed: bool = True) -> 
                         continue
                     client.symbol = symbol
                     candles = app.state.store.candles(symbol, s.interval_label, s.snapshot_candles)
+                    sim: LiveSimRunner = app.state.sim
                     await hub.send(client, {"type": "snapshot", "symbol": symbol, "interval": s.interval_label,
                                             "candles": [c.to_wire() for c in candles],
+                                            "indicators": sim.indicator_points(symbol),
+                                            "sma": {"fast": s.sma_fast, "slow": s.sma_slow},
+                                            "sim_enabled": s.sim_enabled,
+                                            "account": sim.account_view(symbol),
                                             "status": service.status_snapshot()})
                 elif kind == "replay_start":
                     symbol = str(msg.get("symbol", client.symbol or "")).upper()

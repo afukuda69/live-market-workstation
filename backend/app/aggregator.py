@@ -248,7 +248,8 @@ class CandleEngine:
     # ---- completion ------------------------------------------------------
     def finalize_due(self, now_ms: int) -> list[Change]:
         changes = []
-        for c in self.book.open_candles():
+        # oldest first, so downstream consumers (indicators) see candles complete in order
+        for c in sorted(self.book.open_candles(), key=lambda c: (c.symbol, c.bucket_start_ms)):
             if c.bucket_end_ms + self.grace_ms <= now_ms:
                 done = replace(c, is_complete=True, revision=c.revision + 1)
                 ch = Change(done, "finalize", True)

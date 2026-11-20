@@ -8,7 +8,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 PRAGMA journal_mode = WAL;
@@ -72,6 +72,85 @@ CREATE TABLE IF NOT EXISTS candle_revisions (
     is_complete      INTEGER NOT NULL,
     recorded_ms      INTEGER NOT NULL,
     UNIQUE (candle_id, revision)
+);
+
+-- ===== Part 4.2 ==========================================================
+
+-- Historical bars downloaded for backtests (cache, so runs are reproducible
+-- and work offline). Separate from `candles`, which hold live-built data.
+CREATE TABLE IF NOT EXISTS history_bars (
+    symbol      TEXT    NOT NULL,
+    interval    TEXT    NOT NULL,      -- '1m', '5m', '15m', '1h', '1d'
+    time_ms     INTEGER NOT NULL,      -- bar start
+    open REAL NOT NULL, high REAL NOT NULL, low REAL NOT NULL, close REAL NOT NULL,
+    volume      REAL    NOT NULL DEFAULT 0,
+    fetched_ms  INTEGER NOT NULL,      -- when this version of the bar was downloaded
+    PRIMARY KEY (symbol, interval, time_ms)
+);
+
+-- Saved backtest runs: inputs, data used, and results.
+CREATE TABLE IF NOT EXISTS backtest_runs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_ms    INTEGER NOT NULL,
+    symbol        TEXT    NOT NULL,
+    source        TEXT    NOT NULL,    -- 'stored' | 'yahoo' | 'fixture'
+    interval      TEXT    NOT NULL,
+    params_json   TEXT    NOT NULL,
+    data_json     TEXT    NOT NULL,    -- range, bar count, gaps, fetch info
+    metrics_json  TEXT    NOT NULL,
+    result_json   TEXT    NOT NULL     -- trades, round trips, signals, equity, indicators, notes
+);
+
+-- Live simulated (paper) accounts, one active per symbol.
+CREATE TABLE IF NOT EXISTS sim_accounts (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol        TEXT    NOT NULL,
+    created_ms    INTEGER NOT NULL,
+    active        INTEGER NOT NULL DEFAULT 1,
+    fast          INTEGER NOT NULL,
+    slow          INTEGER NOT NULL,
+    initial_cash  REAL    NOT NULL,
+    fee_bps       REAL    NOT NULL,
+    slippage_bps  REAL    NOT NULL,
+    allocation    REAL    NOT NULL
+);
+
+-- Every confirmed crossover the live strategy saw, and what it did.
+CREATE TABLE IF NOT EXISTS sim_signals (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id      INTEGER NOT NULL REFERENCES sim_accounts(id),
+    bucket_start_ms INTEGER NOT NULL,  -- the completed candle that produced it
+    decided_ms      INTEGER NOT NULL,
+    signal          TEXT    NOT NULL,  -- 'up' | 'down'
+    fast REAL, slow REAL, close REAL,
+    action          TEXT    NOT NULL,  -- 'buy' | 'sell' | 'skip'
+    note            TEXT,
+    order_id        INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS sim_orders (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id      INTEGER NOT NULL REFERENCES sim_accounts(id),
+    created_ms      INTEGER NOT NULL,
+    side            TEXT    NOT NULL CHECK (side IN ('buy','sell')),
+    order_type      TEXT    NOT NULL DEFAULT 'market',
+    status          TEXT    NOT NULL,  -- 'filled' | 'rejected'
+    reason          TEXT,
+    reject_reason   TEXT
+);
+
+CREATE TABLE IF NOT EXISTS sim_fills (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id         INTEGER NOT NULL REFERENCES sim_orders(id),
+    account_id       INTEGER NOT NULL REFERENCES sim_accounts(id),
+    time_ms          INTEGER NOT NULL,
+    side             TEXT    NOT NULL,
+    qty              REAL    NOT NULL,
+    ref_price        REAL    NOT NULL,  -- last observed price used as the market price
+    ref_source_ms    INTEGER,           -- source time of that price (shows its age)
+    price            REAL    NOT NULL,  -- after slippage
+    fee              REAL    NOT NULL,
+    realized_pnl     REAL    NOT NULL
 );
 
 -- Feed lifecycle: connects, disconnects, outages, recoveries, rejected messages.

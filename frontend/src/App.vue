@@ -2,6 +2,8 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import PriceChart from './components/PriceChart.vue'
 import StatusBar from './components/StatusBar.vue'
+import AccountPanel from './components/AccountPanel.vue'
+import BacktestView from './components/BacktestView.vue'
 import { createSocket } from './lib/socket'
 import { fmtClock } from './lib/format'
 
@@ -19,6 +21,13 @@ const state = reactive({
   verify: null,
   verifying: false,
   faultBusy: false,
+  view: 'live', // 'live' | 'backtest'
+  intervalSeconds: 60,
+  sma: { fast: 10, slow: 30 },
+  simEnabled: true,
+  account: null,
+  smaVerify: null,
+  smaVerifying: false,
 })
 const clockOffset = ref(0) // server time - browser time
 const now = ref(Date.now())
@@ -52,6 +61,7 @@ function onMessage(m) {
     case 'hello':
       state.symbols = m.symbols
       state.interval = m.interval
+      state.intervalSeconds = m.interval_seconds || 60
       applyStatus(m.status)
       ;(m.events || []).slice().reverse().forEach(pushEvent)
       subscribe(state.symbols.includes(state.symbol) ? state.symbol : state.symbols[0])
@@ -60,7 +70,29 @@ function onMessage(m) {
       if (m.symbol !== state.symbol || state.mode !== 'live') return
       applyStatus(m.status)
       chart.value.setCandles(m.candles)
+      if (m.sma) state.sma = m.sma
+      state.simEnabled = m.sim_enabled !== false
+      chart.value.setIndicators(m.indicators || [])
+      state.account = m.account || null
+      chart.value.setTrades(m.account?.fills || [])
       state.lastCandle = chart.value.lastCandle()
+      state.smaVerify = null
+      break
+    case 'indicator':
+      if (state.mode !== 'live' || m.symbol !== state.symbol) return
+      chart.value.upsertIndicator(m.point)
+      break
+    case 'indicators':
+      if (state.mode !== 'live' || m.symbol !== state.symbol) return
+      chart.value.setIndicators(m.points)
+      break
+    case 'account':
+    case 'trade':
+      if (m.symbol !== state.symbol) return
+      if ((m.account?.fills?.length || 0) !== (state.account?.fills?.length || 0) && state.mode === 'live') {
+        chart.value.setTrades(m.account.fills)
+      }
+      state.account = m.account
       break
     case 'candle':
       if (state.mode !== 'live' || m.candle.symbol !== state.symbol) return
@@ -124,6 +156,26 @@ async function verifyReplay() {
   }
 }
 
+async function verifySma() {
+  state.smaVerifying = true
+  try {
+    const r = await fetch(`/api/indicators/verify?symbol=${encodeURIComponent(state.symbol)}`)
+    state.smaVerify = await r.json()
+  } catch (e) {
+    state.smaVerify = { error: String(e) }
+  } finally {
+    state.smaVerifying = false
+  }
+}
+
+async function resetAccount() {
+  const r = await fetch('/api/sim/reset', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ symbol: state.symbol }),
+  })
+  state.account = await r.json()
+  chart.value.setTrades([])
+}
+
 async function toggleFault() {
   state.faultBusy = true
   try {
@@ -156,15 +208,20 @@ onBeforeUnmount(() => {
         <span class="logo">▮▯</span>
         <div>
           <h1>Live Market Workstation</h1>
-          <div class="subtitle">Part 4.1 · market data &amp; dashboard · {{ state.interval }} candles</div>
+          <div class="subtitle">Part 4.2 · {{ state.interval }} candles · SMA {{ state.sma.fast }}/{{ state.sma.slow }} crossover · simulated trading · backtesting</div>
         </div>
       </div>
-      <nav class="symbols" data-testid="symbols">
+      <nav class="views" data-testid="views">
+        <button :class="{ active: state.view === 'live' }" @click="state.view = 'live'">Live</button>
+        <button :class="{ active: state.view === 'backtest' }" @click="state.view = 'backtest'" data-testid="tab-backtest">Backtest</button>
+      </nav>
+      <nav class="symbols" data-testid="symbols" v-show="state.view === 'live'">
         <button v-for="s in state.symbols" :key="s" :class="{ active: s === state.symbol }" @click="subscribe(s)">{{ s }}</button>
       </nav>
-      <div class="sim-note" title="No orders are placed anywhere">Display only · no trading</div>
+      <div class="sim-note" title="No orders are sent anywhere; all trades are simulated in SQLite">SIMULATED trading only · no real orders</div>
     </header>
 
+    <div class="live-view" v-show="state.view === 'live'">
     <div v-if="state.mode === 'replay'" class="banner replay" data-testid="replay-banner">
       REPLAY — rebuilding {{ state.symbol }} candles from recorded observations in SQLite
       ({{ state.replay.running ? `${state.replay.processed} updates…` : 'finished' }}). Not live data.
@@ -180,10 +237,29 @@ onBeforeUnmount(() => {
 
     <main>
       <section class="chart-area">
-        <PriceChart ref="chart" :mode="state.mode" />
+        <PriceChart ref="chart" :mode="state.mode" :sma="state.sma" :interval-seconds="state.intervalSeconds" />
       </section>
 
       <aside>
+        <AccountPanel v-if="state.simEnabled" :account="state.account" :symbol="state.symbol" :mode="state.mode"
+                      @reset="resetAccount" />
+
+        <div class="panel">
+          <h2>Indicator check</h2>
+          <p class="small">SMA {{ state.sma.fast }} and SMA {{ state.sma.slow }} use completed candles only. Faded line ends and "?" markers include the unfinished candle and are never traded.</p>
+          <button class="secondary" @click="verifySma" :disabled="state.smaVerifying" data-testid="verify-sma">Verify live SMA = batch</button>
+          <div v-if="state.smaVerify" class="small" data-testid="verify-sma-result">
+            <template v-if="state.smaVerify.error">Error: {{ state.smaVerify.error }}</template>
+            <template v-else-if="state.smaVerify.match === null">Not enough completed candles yet ({{ state.smaVerify.completed_candles }}).</template>
+            <template v-else>
+              <span :class="state.smaVerify.match ? 'ok' : 'bad'">{{ state.smaVerify.match ? '✓ match' : '✗ differ' }}</span>
+              — incremental {{ state.smaVerify.incremental.fast?.toFixed(4) }} / {{ state.smaVerify.incremental.slow?.toFixed(4) }}
+              vs batch {{ state.smaVerify.batch?.fast?.toFixed(4) }} / {{ state.smaVerify.batch?.slow?.toFixed(4) }}
+              over {{ state.smaVerify.completed_candles }} candles
+            </template>
+          </div>
+        </div>
+
         <div class="panel">
           <h2>Replay recorded data</h2>
           <div class="row">
@@ -246,6 +322,9 @@ onBeforeUnmount(() => {
         </div>
       </aside>
     </main>
+    </div>
+
+    <BacktestView v-show="state.view === 'backtest'" :symbols="state.symbols" :active="state.view === 'backtest'" />
   </div>
 </template>
 
@@ -256,7 +335,10 @@ header { display: flex; align-items: center; gap: 24px; }
 .logo { color: #26a69a; font-size: 22px; letter-spacing: -4px; }
 h1 { font-size: 17px; margin: 0; color: #e6edf3; }
 .subtitle { font-size: 11px; color: #8b949e; }
-.symbols { display: flex; gap: 6px; }
+.symbols, .views { display: flex; gap: 6px; }
+.views button { background: transparent; border: 1px solid #30363d; color: #c9d1d9; padding: 5px 14px; border-radius: 6px; cursor: pointer; font-weight: 600; }
+.views button.active { background: #30363d; color: #fff; }
+.live-view { flex: 1; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
 .symbols button { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 5px 12px; border-radius: 6px; cursor: pointer; font-weight: 600; }
 .symbols button.active { background: #1f6feb; border-color: #1f6feb; color: #fff; }
 .sim-note { margin-left: auto; font-size: 11px; color: #8b949e; border: 1px solid #30363d; padding: 3px 8px; border-radius: 999px; }

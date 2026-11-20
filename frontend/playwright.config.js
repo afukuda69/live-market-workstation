@@ -16,7 +16,9 @@ export default defineConfig({
     {
       command: `${python} -m uvicorn app.main:app --port 8000`,
       cwd: '../backend',
-      env: { FEED_MODE: 'mock', DB_PATH: 'data/e2e.db', BACKFILL_HISTORY: '0', FINALIZE_GRACE_SECONDS: '2' },
+      // 2-second candles and short SMAs so indicators and crossovers appear within seconds
+      env: { FEED_MODE: 'mock', DB_PATH: 'data/e2e.db', BACKFILL_HISTORY: '0', FINALIZE_GRACE_SECONDS: '1',
+             INTERVAL_SECONDS: '2', SMA_FAST: '2', SMA_SLOW: '4' },
       url: 'http://127.0.0.1:8000/api/health',
       reuseExistingServer: !process.env.CI,
       timeout: 30_000,

@@ -21,3 +21,4 @@ frontend/playwright-report/
 
 # temp files from file-sync tools
 .fuse_hidden*
+_transfer/

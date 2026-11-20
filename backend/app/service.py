@@ -78,6 +78,8 @@ class MarketService:
         )
         self.status = FeedStatus(settings.feed_mode, settings.symbols, settings.stale_after_seconds)
         self.counters = {"duplicates": 0, "rejected": 0}
+        # async callbacks run after every candle change (Part 4.2: indicators + paper trading)
+        self.listeners: list = []
         self._last_reject_event_ms = 0
 
     # ---- status ----------------------------------------------------------
@@ -155,6 +157,11 @@ class MarketService:
              "candle": change.candle.to_wire()},
             symbol=change.candle.symbol,
         )
+        for listener in self.listeners:
+            try:
+                await listener(change)
+            except Exception:
+                log.exception("candle listener failed")
 
     # ---- background loops ------------------------------------------------
     async def housekeeping_loop(self) -> None:

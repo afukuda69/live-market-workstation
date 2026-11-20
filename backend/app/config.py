@@ -64,6 +64,14 @@ class Settings:
     stale_after_seconds: float = field(default_factory=lambda: float(os.environ.get("STALE_AFTER_SECONDS", "30")))
     backfill_history: bool = field(default_factory=lambda: _bool("BACKFILL_HISTORY", True))
     snapshot_candles: int = field(default_factory=lambda: int(os.environ.get("SNAPSHOT_CANDLES", "300")))
+    # ---- Part 4.2: indicators and simulated trading --------------------------
+    sma_fast: int = field(default_factory=lambda: int(os.environ.get("SMA_FAST", "10")))
+    sma_slow: int = field(default_factory=lambda: int(os.environ.get("SMA_SLOW", "30")))
+    sim_enabled: bool = field(default_factory=lambda: _bool("SIM_ENABLED", True))
+    sim_initial_cash: float = field(default_factory=lambda: float(os.environ.get("SIM_INITIAL_CASH", "100000")))
+    sim_fee_bps: float = field(default_factory=lambda: float(os.environ.get("SIM_FEE_BPS", "10")))
+    sim_slippage_bps: float = field(default_factory=lambda: float(os.environ.get("SIM_SLIPPAGE_BPS", "5")))
+    sim_allocation: float = field(default_factory=lambda: float(os.environ.get("SIM_ALLOCATION", "1.0")))
 
     @property
     def interval_ms(self) -> int:

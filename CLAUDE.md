@@ -8,6 +8,9 @@ Yahoo Finance data → FastAPI → SQLite → Vue chart, with replay and visible
 status. Later parts add indicators, simulated trading, backtesting and AI —
 **all trading must remain simulated**; never add code that places real orders.
 
+Part 4.2 (current) = SMA crossover indicators, a simulated account traded by
+the strategy on completed candles, and a backtester.
+
 ## Stack and commands
 - Backend: Python 3.11+, FastAPI, `backend/`. Run `uvicorn app.main:app --reload --port 8000` from `backend/`.
 - Frontend: Vue 3 + Vite + Lightweight Charts 4, `frontend/`. Run `npm run dev`.
@@ -25,8 +28,22 @@ status. Later parts add indicators, simulated trading, backtesting and AI —
 6. **Truthful status.** The UI must show source, feed state and data age (based on source timestamps, not redraw time). Simulated or injected conditions must be labelled (SIMULATED, INJECTED).
 7. **No credentials in the repo.** Config comes from env / `backend/.env` (git-ignored). If a later part adds API keys, add them to `.env.example` as empty placeholders only.
 
+8. **Indicators and trading use completed candles only.** Values that include
+   the forming candle are `provisional`, shown differently, and never traded.
+9. **No look-ahead in backtests.** A decision at bar i may use bars 0..i only;
+   its fill uses bar i+1's open. Keep `test_no_look_ahead_truncation` passing.
+10. **One implementation of the rules.** `indicators.py`, `strategy.py` and
+    `accounting.py` are shared by live paper trading and the backtester; do
+    not duplicate the logic elsewhere. Keep them free of I/O.
+11. **Accounts are rebuilt from fills.** `sim_fills` is the source of truth;
+    the identity equity − initial = realized + unrealized − fees must hold.
+12. **Anything that finalises candles must go through
+    `MarketService._broadcast_change`**, otherwise listeners (live SMAs) miss
+    them (see evidence log E8).
+
 ## When changing things
 - Schema change → update `db.py`, `docs/design.md` §4, and add/adjust tests.
+- New indicator/strategy/accounting rule → hand-worked example test + pandas/reference check where possible; document the assumption in `docs/design.md` §10–13.
 - New candle rule → test in `tests/test_aggregator.py` and a replay-equivalence check in `tests/test_replay.py`.
 - New UI state → `data-testid` on the element and a Playwright check in `frontend/e2e/`.
 - Distinguish mocked tests from live observations in `docs/verification.md`.
